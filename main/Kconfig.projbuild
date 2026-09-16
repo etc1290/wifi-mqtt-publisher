@@ -1,0 +1,63 @@
+menu "WiFi-MQTT Publisher Configuration"
+
+    menu "WiFi Settings"
+        config WIFI_SSID
+            string "WiFi SSID"
+            default "myssid"
+            help
+                SSID (network name) to connect to.
+
+        config WIFI_PASSWORD
+            string "WiFi Password"
+            default "mypassword"
+            help
+                WiFi password (WPA or WPA2).
+
+        config WIFI_MAX_RETRY
+            int "Maximum WiFi reconnect retries"
+            default 10
+            help
+                Maximum number of retries before giving up and restarting.
+    endmenu
+
+    menu "MQTT Settings"
+        config MQTT_BROKER_URI
+            string "MQTT Broker URI"
+            default "mqtt://test.mosquitto.org:1883"
+            help
+                URI of the MQTT broker (e.g., mqtt://192.168.1.100:1883).
+
+        config MQTT_TOPIC
+            string "MQTT Publish Topic"
+            default "home/esp32/dht11"
+            help
+                Topic to publish sensor data to.
+
+        config MQTT_USERNAME
+            string "MQTT Username (optional)"
+            default ""
+            help
+                Username for MQTT broker authentication. Leave empty if not required.
+
+        config MQTT_PASSWORD
+            string "MQTT Password (optional)"
+            default ""
+            help
+                Password for MQTT broker authentication. Leave empty if not required.
+    endmenu
+
+    menu "Sensor Settings"
+        config DHT11_GPIO
+            int "DHT11 Data GPIO Pin"
+            default 4
+            help
+                GPIO pin connected to the DHT11 data pin.
+
+        config SENSOR_READ_INTERVAL_SEC
+            int "Sensor read interval (seconds)"
+            default 10
+            help
+                How often to read DHT11 and publish data (in seconds).
+    endmenu
+
+endmenu
