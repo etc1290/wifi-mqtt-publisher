@@ -304,14 +304,21 @@ static esp_err_t publish_sensor_data(void)
     /* DHT11 needs ~1 s settle time after power-on */
     vTaskDelay(pdMS_TO_TICKS(2000));
 
+    /* Warm-up read: DHT11 always returns 0 on first read after power-on.
+     * Do a throwaway read to prime the sensor, then wait before the real read. */
+    dht11_data_t dummy = {0};
+    dht11_read(DHT11_DATA_GPIO, &dummy);
+    ESP_LOGI(TAG, "DHT11 warm-up read done (discarded)");
+    vTaskDelay(pdMS_TO_TICKS(2000));        /* DHT11 needs ≥1 s between reads */
+
     /* Read sensor (retry up to 3 times) */
     dht11_data_t sensor = {0};
     esp_err_t ret = ESP_FAIL;
     for (int attempt = 1; attempt <= 3; attempt++) {
         ret = dht11_read(DHT11_DATA_GPIO, &sensor);
-        if (ret == ESP_OK) break;
-        ESP_LOGW(TAG, "DHT11 read attempt %d/3 failed (0x%x)", attempt, ret);
-        vTaskDelay(pdMS_TO_TICKS(500));
+        if (ret == ESP_OK && (sensor.temperature > 0.0f || sensor.humidity > 0.0f)) break;
+        ESP_LOGW(TAG, "DHT11 read attempt %d/3 failed or zero", attempt);
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 
     if (ret != ESP_OK) {
