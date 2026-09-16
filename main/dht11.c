@@ -14,6 +14,7 @@
 
 #include <string.h>
 #include "esp_log.h"
+#include "esp_timer.h"             /* esp_timer_get_time – hardware µs timer */
 #include "esp_rom_sys.h"           /* esp_rom_delay_us (works on RISC-V) */
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -24,19 +25,20 @@ static const char *TAG = "DHT11";
 
 /**
  * @brief Wait until the GPIO reaches the expected level, or timeout.
- * @return Duration in µs spent waiting, or -1 on timeout.
+ * @return Actual duration in µs (hardware timer), or -1 on timeout.
+ *
+ * Uses esp_timer_get_time() instead of a software counter so that
+ * the returned value is real microseconds regardless of loop overhead.
  */
 static int dht11_wait_for_level(gpio_num_t pin, int level, int timeout_us)
 {
-    int elapsed = 0;
+    int64_t start = esp_timer_get_time();
     while (gpio_get_level(pin) != level) {
-        if (elapsed >= timeout_us) {
+        if ((esp_timer_get_time() - start) >= timeout_us) {
             return -1;
         }
-        esp_rom_delay_us(1);
-        elapsed++;
     }
-    return elapsed;
+    return (int)(esp_timer_get_time() - start);
 }
 
 /* ---------- public API ------------------------------------------------- */
