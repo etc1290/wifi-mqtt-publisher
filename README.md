@@ -1,12 +1,13 @@
-# WiFi MQTT Publisher
+# WiFi MQTT Publisher（low-power-mode）
 
-基於 ESP-IDF 的 ESP32-C3 範例專案：讀取 DHT11 溫濕度感測器，並透過 WiFi 以 MQTT 定期發佈 JSON 資料。
+基於 ESP-IDF 的 ESP32-C3 範例專案：讀取 DHT11 溫濕度感測器，並透過 WiFi 以 MQTT 發佈 JSON 資料。本 branch 為 **Deep Sleep 低功耗版**：每次喚醒只執行一輪「連線 → 讀取 → 發佈」，之後立即進入深度睡眠。
 
 ## 功能
 
-- WiFi Station 模式連線，斷線自動重試（超過重試上限後重新啟動）
-- MQTT 客戶端，支援選用的帳號／密碼驗證與自動重連
-- 每 N 秒讀取 DHT11 並發佈 JSON
+- 每個喚醒週期：連 WiFi → 連 MQTT → 讀取 DHT11 → 以 QoS 1 發佈並等待 Broker ACK → 進入 Deep Sleep
+- DHT11 讀取最多嘗試 3 次
+- 睡眠時間由 `SENSOR_READ_INTERVAL_SEC` 決定，以 timer 喚醒
+- 狀態 LED 指示運作與錯誤（見下表）
 - 所有參數皆可透過 `menuconfig` 設定
 
 ## 硬體需求
@@ -16,6 +17,7 @@
 | 開發板 | ESP32-C3（`IDF_TARGET = esp32c3`） |
 | 感測器 | DHT11 |
 | 接線 | DHT11 DATA → GPIO4（預設，可於 menuconfig 修改）、VCC → 3.3V、GND → GND |
+| LED | 預設 GPIO8（可修改；板載 LED 若為低電位點亮，請啟用 `LED_ACTIVE_LOW`） |
 
 ## 專案結構
 
@@ -75,17 +77,19 @@ idf.py -p <PORT> flash monitor
 | `MQTT_USERNAME` | 空 | 選用，Broker 帳號 |
 | `MQTT_PASSWORD` | 空 | 選用，Broker 密碼 |
 | `DHT11_GPIO` | `4` | DHT11 資料腳位 |
-| `SENSOR_READ_INTERVAL_SEC` | `10` | 讀取／發佈間隔（秒） |
+| `SENSOR_READ_INTERVAL_SEC` | `10` | Deep Sleep 睡眠時間（秒） |
+| `LED_GPIO` | `8` | 狀態 LED 腳位 |
+| `LED_ACTIVE_LOW` | 關閉 | LED 為低電位點亮（常見於板載 LED）時啟用 |
 
 > 預設 Broker 為公開的 `test.mosquitto.org`，任何人皆可訂閱，請勿用於敏感資料，並建議自訂專屬 Topic。
 
 ## MQTT 負載格式
 
 ```json
-{"temperature":25.0,"humidity":60.0,"count":1}
+{"temperature":25.0,"humidity":60.0,"boot":1}
 ```
 
-`count` 為成功讀取的累計次數。可用以下指令驗證：
+`boot` 為開機／喚醒累計次數（存放於 RTC 記憶體，Deep Sleep 後保留；斷電後歸零）。可用以下指令驗證：
 
 ```bash
 mosquitto_sub -h test.mosquitto.org -t "home/esp32/dht11"
@@ -93,6 +97,17 @@ mosquitto_sub -h test.mosquitto.org -t "home/esp32/dht11"
 
 ## 運作流程
 
-1. 初始化 NVS 與 WiFi，等待取得 IP
-2. 啟動 MQTT 客戶端
-3. 每隔 `SENSOR_READ_INTERVAL_SEC` 秒讀取 DHT11，成功則發佈；讀取失敗或 MQTT 未連線時略過該次並於下個週期重試
+1. 喚醒（或上電）、LED 亮起，初始化 NVS 與 WiFi
+2. 連線 WiFi，再連線 MQTT Broker
+3. 讀取 DHT11，發佈 JSON（QoS 1）並等待 ACK
+4. LED 熄滅，進入 Deep Sleep `SENSOR_READ_INTERVAL_SEC` 秒，時間到後回到步驟 1
+
+### LED 指示
+
+| 狀態 | LED |
+| --- | --- |
+| 運作中（連線、讀取、發佈） | 恆亮 |
+| 發佈成功 | 快閃 2 次 |
+| 感測器讀取／發佈失敗 | 慢閃 3 次（200 ms） |
+| WiFi 連線失敗 | 快閃 5 次後睡眠 |
+| MQTT 連線失敗 | 慢閃 3 次（300 ms）後睡眠 |
