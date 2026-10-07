@@ -5,19 +5,19 @@ menu "WiFi-MQTT Publisher Configuration"
             string "WiFi SSID"
             default "myssid"
             help
-                SSID (network name) to connect to.
+                Default SSID (network name). Can be overridden via web portal.
 
         config WIFI_PASSWORD
             string "WiFi Password"
             default "mypassword"
             help
-                WiFi password (WPA or WPA2).
+                Default WiFi password. Can be overridden via web portal.
 
         config WIFI_MAX_RETRY
             int "Maximum WiFi reconnect retries"
-            default 10
+            default 5
             help
-                Maximum number of retries before giving up and restarting.
+                Number of retries before falling back to config portal.
     endmenu
 
     menu "MQTT Settings"
@@ -25,28 +25,28 @@ menu "WiFi-MQTT Publisher Configuration"
             string "MQTT Broker URI"
             default "mqtt://test.mosquitto.org:1883"
             help
-                URI of the MQTT broker (e.g., mqtt://192.168.1.100:1883).
+                Default MQTT broker URI. Can be overridden via web portal.
 
         config MQTT_TOPIC
             string "MQTT Publish Topic"
             default "home/esp32/dht11"
             help
-                Topic to publish sensor data to.
+                Default topic. Can be overridden via web portal.
 
         config MQTT_USERNAME
             string "MQTT Username (optional)"
             default ""
             help
-                Username for MQTT broker authentication. Leave empty if not required.
+                Username for MQTT broker authentication.
 
         config MQTT_PASSWORD
             string "MQTT Password (optional)"
             default ""
             help
-                Password for MQTT broker authentication. Leave empty if not required.
+                Password for MQTT broker authentication.
     endmenu
 
-    menu "Sensor Settings"
+    menu "Sensor & Hardware"
         config DHT11_GPIO
             int "DHT11 Data GPIO Pin"
             default 4
@@ -58,6 +58,12 @@ menu "WiFi-MQTT Publisher Configuration"
             default 10
             help
                 How often to read DHT11 and publish data (in seconds).
+
+        config LED_GPIO
+            int "Indicator LED GPIO Pin"
+            default 8
+            help
+                GPIO pin for the status indicator LED.
     endmenu
 
 endmenu

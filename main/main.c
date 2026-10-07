@@ -3,10 +3,12 @@
  * @brief ESP32-C3 WiFi → MQTT Publisher with DHT11 sensor
  *
  * Flow:
- *   1. Initialize NVS, TCP/IP, event loop
- *   2. Connect to WiFi (STA mode, retries on failure)
- *   3. Connect to MQTT broker
+ *   1. Initialize NVS → load config (NVS or Kconfig defaults)
+ *   2. Try WiFi STA connection → if fail → config portal (AP mode)
+ *   3. Try MQTT connection → if fail → config portal (AP mode)
  *   4. Every N seconds: read DHT11 → publish JSON to MQTT topic
+ *
+ * Config portal: AP "ESP32-Config" → http://192.168.4.1
  */
 
 #include <stdio.h>
@@ -25,22 +27,16 @@
 #include "mqtt_client.h"
 
 #include "dht11.h"
+#include "config_store.h"
+#include "config_portal.h"
 
 /* ═══════════════════════════════════════════════════════════════════════════
- *  Configuration from Kconfig (idf.py menuconfig)
+ *  Configuration
  * ═══════════════════════════════════════════════════════════════════════ */
-
-#define WIFI_SSID               CONFIG_WIFI_SSID
-#define WIFI_PASS               CONFIG_WIFI_PASSWORD
-#define WIFI_MAX_RETRY          CONFIG_WIFI_MAX_RETRY
-
-#define MQTT_BROKER_URI         CONFIG_MQTT_BROKER_URI
-#define MQTT_TOPIC              CONFIG_MQTT_TOPIC
-#define MQTT_USERNAME           CONFIG_MQTT_USERNAME
-#define MQTT_PASSWORD           CONFIG_MQTT_PASSWORD
 
 #define DHT11_DATA_GPIO         ((gpio_num_t)CONFIG_DHT11_GPIO)
 #define SENSOR_READ_INTERVAL    CONFIG_SENSOR_READ_INTERVAL_SEC
+#define LED_GPIO                ((gpio_num_t)CONFIG_LED_GPIO)
 
 /* ═══════════════════════════════════════════════════════════════════════════
  *  Constants & globals
@@ -51,15 +47,38 @@ static const char *TAG = "MAIN";
 /* Event group bits */
 #define WIFI_CONNECTED_BIT  BIT0
 #define WIFI_FAIL_BIT       BIT1
+#define MQTT_CONNECTED_BIT  BIT2
 
-static EventGroupHandle_t s_wifi_event_group;
+static EventGroupHandle_t s_event_group;
 static int s_retry_count = 0;
 
 static esp_mqtt_client_handle_t s_mqtt_client = NULL;
 static bool s_mqtt_connected = false;
 
+/* Active configuration (loaded from NVS or Kconfig defaults) */
+static device_config_t s_config;
+
 /* ═══════════════════════════════════════════════════════════════════════════
- *  WiFi
+ *  LED indicator
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+static void led_init(void)
+{
+    gpio_config_t io = {
+        .pin_bit_mask = (1ULL << LED_GPIO),
+        .mode         = GPIO_MODE_OUTPUT,
+        .pull_up_en   = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type    = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&io);
+    gpio_set_level(LED_GPIO, 0);
+}
+
+static void led_set(bool on) { gpio_set_level(LED_GPIO, on ? 1 : 0); }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  WiFi STA
  * ═══════════════════════════════════════════════════════════════════════ */
 
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
@@ -73,14 +92,15 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
             break;
 
         case WIFI_EVENT_STA_DISCONNECTED:
-            if (s_retry_count < WIFI_MAX_RETRY) {
+            if (s_retry_count < CONFIG_WIFI_MAX_RETRY) {
                 s_retry_count++;
                 ESP_LOGW(TAG, "WiFi disconnected – retry %d/%d",
-                         s_retry_count, WIFI_MAX_RETRY);
+                         s_retry_count, CONFIG_WIFI_MAX_RETRY);
                 esp_wifi_connect();
             } else {
-                ESP_LOGE(TAG, "WiFi connect failed after %d retries", WIFI_MAX_RETRY);
-                xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
+                ESP_LOGE(TAG, "WiFi connect failed after %d retries",
+                         CONFIG_WIFI_MAX_RETRY);
+                xEventGroupSetBits(s_event_group, WIFI_FAIL_BIT);
             }
             break;
 
@@ -91,14 +111,16 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
         ESP_LOGI(TAG, "✓ Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
         s_retry_count = 0;
-        xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+        xEventGroupSetBits(s_event_group, WIFI_CONNECTED_BIT);
     }
 }
 
+/**
+ * @brief Try connecting to WiFi STA.
+ * @return ESP_OK on success, ESP_FAIL if connection failed.
+ */
 static esp_err_t wifi_init_sta(void)
 {
-    s_wifi_event_group = xEventGroupCreate();
-
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     esp_netif_create_default_wifi_sta();
@@ -106,34 +128,35 @@ static esp_err_t wifi_init_sta(void)
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
-    /* Register event handlers */
     ESP_ERROR_CHECK(esp_event_handler_instance_register(
         WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, NULL));
     ESP_ERROR_CHECK(esp_event_handler_instance_register(
         IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, NULL));
 
-    /* Configure WiFi */
     wifi_config_t wifi_config = {
         .sta = {
             .threshold.authmode = WIFI_AUTH_WPA2_PSK,
         },
     };
-    strlcpy((char *)wifi_config.sta.ssid,     WIFI_SSID, sizeof(wifi_config.sta.ssid));
-    strlcpy((char *)wifi_config.sta.password,  WIFI_PASS, sizeof(wifi_config.sta.password));
+    strlcpy((char *)wifi_config.sta.ssid,
+            s_config.wifi_ssid, sizeof(wifi_config.sta.ssid));
+    strlcpy((char *)wifi_config.sta.password,
+            s_config.wifi_password, sizeof(wifi_config.sta.password));
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    ESP_LOGI(TAG, "Connecting to SSID: %s …", WIFI_SSID);
+    ESP_LOGI(TAG, "Connecting to SSID: %s …", s_config.wifi_ssid);
 
-    /* Block until connected or failed */
-    EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
+    /* Block until connected or failed (timeout 20s) */
+    EventBits_t bits = xEventGroupWaitBits(s_event_group,
                                            WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
-                                           pdFALSE, pdFALSE, portMAX_DELAY);
+                                           pdFALSE, pdFALSE,
+                                           pdMS_TO_TICKS(20000));
 
     if (bits & WIFI_CONNECTED_BIT) {
-        ESP_LOGI(TAG, "✓ WiFi connected to %s", WIFI_SSID);
+        ESP_LOGI(TAG, "✓ WiFi connected to %s", s_config.wifi_ssid);
         return ESP_OK;
     }
 
@@ -152,8 +175,9 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
 
     switch ((esp_mqtt_event_id_t)event_id) {
     case MQTT_EVENT_CONNECTED:
-        ESP_LOGI(TAG, "✓ MQTT connected to %s", MQTT_BROKER_URI);
+        ESP_LOGI(TAG, "✓ MQTT connected to %s", s_config.mqtt_broker_uri);
         s_mqtt_connected = true;
+        xEventGroupSetBits(s_event_group, MQTT_CONNECTED_BIT);
         break;
 
     case MQTT_EVENT_DISCONNECTED:
@@ -174,18 +198,21 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
     }
 }
 
-static void mqtt_init(void)
+/**
+ * @brief Start MQTT client and wait for connection.
+ * @return ESP_OK on success, ESP_FAIL on timeout.
+ */
+static esp_err_t mqtt_connect(void)
 {
     esp_mqtt_client_config_t mqtt_cfg = {
-        .broker.address.uri = MQTT_BROKER_URI,
+        .broker.address.uri = s_config.mqtt_broker_uri,
     };
 
-    /* Optional authentication */
-    if (strlen(MQTT_USERNAME) > 0) {
-        mqtt_cfg.credentials.username = MQTT_USERNAME;
+    if (strlen(s_config.mqtt_username) > 0) {
+        mqtt_cfg.credentials.username = s_config.mqtt_username;
     }
-    if (strlen(MQTT_PASSWORD) > 0) {
-        mqtt_cfg.credentials.authentication.password = MQTT_PASSWORD;
+    if (strlen(s_config.mqtt_password) > 0) {
+        mqtt_cfg.credentials.authentication.password = s_config.mqtt_password;
     }
 
     s_mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
@@ -193,7 +220,23 @@ static void mqtt_init(void)
                                    mqtt_event_handler, NULL);
     esp_mqtt_client_start(s_mqtt_client);
 
-    ESP_LOGI(TAG, "MQTT client started → %s", MQTT_BROKER_URI);
+    ESP_LOGI(TAG, "MQTT connecting to %s …", s_config.mqtt_broker_uri);
+
+    /* Wait for MQTT connection (timeout 15s) */
+    EventBits_t bits = xEventGroupWaitBits(s_event_group,
+                                           MQTT_CONNECTED_BIT,
+                                           pdFALSE, pdFALSE,
+                                           pdMS_TO_TICKS(15000));
+
+    if (bits & MQTT_CONNECTED_BIT) {
+        return ESP_OK;
+    }
+
+    ESP_LOGE(TAG, "✗ MQTT connection timeout");
+    esp_mqtt_client_stop(s_mqtt_client);
+    esp_mqtt_client_destroy(s_mqtt_client);
+    s_mqtt_client = NULL;
+    return ESP_FAIL;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -212,7 +255,11 @@ static void sensor_publish_task(void *pvParameters)
     };
     gpio_config(&io_conf);
 
-    /* Initial settle time for DHT11 (needs ~1 s after power-on) */
+    /* DHT11 warm-up: first read after power-on returns 0 */
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    dht11_data_t dummy = {0};
+    dht11_read(DHT11_DATA_GPIO, &dummy);
+    ESP_LOGI(TAG, "DHT11 warm-up read done (discarded)");
     vTaskDelay(pdMS_TO_TICKS(2000));
 
     char payload[128];
@@ -230,9 +277,15 @@ static void sensor_publish_task(void *pvParameters)
 
             if (s_mqtt_connected) {
                 int msg_id = esp_mqtt_client_publish(
-                    s_mqtt_client, MQTT_TOPIC, payload, 0, /*qos=*/1, /*retain=*/0);
+                    s_mqtt_client, s_config.mqtt_topic,
+                    payload, 0, /*qos=*/1, /*retain=*/0);
                 ESP_LOGI(TAG, "📤 Published [%s] → %s  (msg_id=%d)",
-                         MQTT_TOPIC, payload, msg_id);
+                         s_config.mqtt_topic, payload, msg_id);
+
+                /* Brief LED flash on successful publish */
+                led_set(true);
+                vTaskDelay(pdMS_TO_TICKS(100));
+                led_set(false);
             } else {
                 ESP_LOGW(TAG, "MQTT not connected – skipping publish");
             }
@@ -241,6 +294,53 @@ static void sensor_publish_task(void *pvParameters)
         }
 
         vTaskDelay(pdMS_TO_TICKS(SENSOR_READ_INTERVAL * 1000));
+    }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  BOOT button monitor task (GPIO 9 – hold 3 s to factory-reset)
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+#define BOOT_BUTTON_GPIO  GPIO_NUM_9
+
+static void reset_button_task(void *pvParameters)
+{
+    /* Configure BOOT button GPIO */
+    gpio_config_t btn_cfg = {
+        .pin_bit_mask = (1ULL << BOOT_BUTTON_GPIO),
+        .mode         = GPIO_MODE_INPUT,
+        .pull_up_en   = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type    = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&btn_cfg);
+
+    while (1) {
+        /* Wait until button is pressed (active LOW) */
+        if (gpio_get_level(BOOT_BUTTON_GPIO) == 0) {
+            ESP_LOGW(TAG, "BOOT button pressed – hold 3 s to reset config …");
+
+            /* Count how long button stays held, blink LED as feedback */
+            int held_ms = 0;
+            while (gpio_get_level(BOOT_BUTTON_GPIO) == 0 && held_ms < 3000) {
+                led_set((held_ms / 100) % 2 == 0);  /* fast blink */
+                vTaskDelay(pdMS_TO_TICKS(50));
+                held_ms += 50;
+            }
+            led_set(false);
+
+            if (held_ms >= 3000) {
+                ESP_LOGW(TAG, "🗑️  Erasing saved config from NVS …");
+                config_erase();
+                ESP_LOGW(TAG, "✓ Config erased – restarting …");
+                vTaskDelay(pdMS_TO_TICKS(500));
+                esp_restart();
+            } else {
+                ESP_LOGI(TAG, "Button released early (%d ms) – ignored", held_ms);
+            }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(100));  /* poll every 100 ms */
     }
 }
 
@@ -254,7 +354,10 @@ void app_main(void)
     ESP_LOGI(TAG, "║   ESP32-C3 WiFi MQTT DHT11 Publisher    ║");
     ESP_LOGI(TAG, "╚══════════════════════════════════════════╝");
 
-    /* ── Initialize NVS (required for WiFi) ───────────────────────────── */
+    /* ── LED init ─────────────────────────────────────────────────────── */
+    led_init();
+
+    /* ── Initialize NVS ───────────────────────────────────────────────── */
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -262,19 +365,39 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(ret);
 
-    /* ── Connect to WiFi ──────────────────────────────────────────────── */
+    /* ── Load config from NVS (or Kconfig defaults) ───────────────────── */
+    config_load(&s_config);
+    ESP_LOGI(TAG, "Config: SSID=%s  Broker=%s  Topic=%s",
+             s_config.wifi_ssid, s_config.mqtt_broker_uri, s_config.mqtt_topic);
+
+    /* ── Event group for sync ─────────────────────────────────────────── */
+    s_event_group = xEventGroupCreate();
+
+    /* ── Step 1: Connect WiFi ─────────────────────────────────────────── */
+    led_set(true);  /* LED on while connecting */
+
     if (wifi_init_sta() != ESP_OK) {
-        ESP_LOGE(TAG, "WiFi init failed – restarting in 5 seconds …");
-        vTaskDelay(pdMS_TO_TICKS(5000));
-        esp_restart();
+        ESP_LOGW(TAG, "WiFi failed → starting config portal …");
+        led_set(false);
+        config_portal_start(&s_config, "WiFi connection failed. Check SSID and password.");
+        /* ↑ blocks until user saves, then restarts */
     }
 
-    /* ── Start MQTT client ────────────────────────────────────────────── */
-    mqtt_init();
+    /* ── Step 2: Connect MQTT ─────────────────────────────────────────── */
+    if (mqtt_connect() != ESP_OK) {
+        ESP_LOGW(TAG, "MQTT failed → starting config portal …");
+        led_set(false);
+        config_portal_start(&s_config, "MQTT broker connection failed. Check broker URI.");
+        /* ↑ blocks until user saves, then restarts */
+    }
 
-    /* ── Launch sensor reading + publishing task ──────────────────────── */
+    led_set(false);
+
+    /* ── Step 3: Launch background tasks ──────────────────────────────── */
     xTaskCreate(sensor_publish_task, "sensor_pub", 4096, NULL, 5, NULL);
+    xTaskCreate(reset_button_task,   "reset_btn",  2048, NULL, 3, NULL);
 
     ESP_LOGI(TAG, "🚀 System ready! Publishing every %d seconds to [%s]",
-             SENSOR_READ_INTERVAL, MQTT_TOPIC);
+             SENSOR_READ_INTERVAL, s_config.mqtt_topic);
+    ESP_LOGI(TAG, "💡 Hold BOOT button 3 s to reset config");
 }
