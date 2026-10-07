@@ -1,13 +1,14 @@
-# WiFi MQTT Publisher
+# WiFi MQTT Publisher（WebUI）
 
-基於 ESP-IDF 的 ESP32-C3 範例專案：讀取 DHT11 溫濕度感測器，並透過 WiFi 以 MQTT 定期發佈 JSON 資料。
+基於 ESP-IDF 的 ESP32-C3 範例專案：讀取 DHT11 溫濕度感測器，並透過 WiFi 以 MQTT 定期發佈 JSON 資料。本 branch 為 **WebUI 版**：設定可存於 NVS，連線失敗時自動開啟網頁設定入口，不必重新編譯即可更改 WiFi / MQTT 參數。
 
 ## 功能
 
-- WiFi Station 模式連線，斷線自動重試（超過重試上限後重新啟動）
-- MQTT 客戶端，支援選用的帳號／密碼驗證與自動重連
-- 每 N 秒讀取 DHT11 並發佈 JSON
-- 所有參數皆可透過 `menuconfig` 設定
+- 啟動時從 NVS 載入設定；NVS 無資料時使用 menuconfig 的預設值
+- WiFi 或 MQTT 連線失敗時，進入 AP 模式並開啟設定網頁（Config Portal）
+- 網頁儲存設定後寫入 NVS 並自動重啟
+- 長按 BOOT 鈕 3 秒可清除已儲存設定（恢復 menuconfig 預設值）
+- 每 N 秒讀取 DHT11 並發佈 JSON，發佈成功時 LED 短閃
 
 ## 硬體需求
 
@@ -16,6 +17,8 @@
 | 開發板 | ESP32-C3（`IDF_TARGET = esp32c3`） |
 | 感測器 | DHT11 |
 | 接線 | DHT11 DATA → GPIO4（預設，可於 menuconfig 修改）、VCC → 3.3V、GND → GND |
+| LED | 預設 GPIO8（高電位點亮） |
+| BOOT 鈕 | GPIO9，用於清除設定 |
 
 ## 專案結構
 
@@ -23,7 +26,9 @@
 .
 ├── CMakeLists.txt
 └── main
-    ├── main.c            # WiFi / MQTT 初始化與發佈任務
+    ├── main.c            # WiFi / MQTT 初始化、發佈任務、BOOT 鈕監控
+    ├── config_store.c/h  # NVS 設定儲存
+    ├── config_portal.c/h # AP 模式 + 網頁設定入口
     ├── dht11.c / dht11.h # DHT11 驅動
     ├── Kconfig.projbuild # menuconfig 設定項目
     └── CMakeLists.txt
@@ -69,13 +74,14 @@ idf.py -p <PORT> flash monitor
 | --- | --- | --- |
 | `WIFI_SSID` | `myssid` | WiFi 名稱 |
 | `WIFI_PASSWORD` | `mypassword` | WiFi 密碼 |
-| `WIFI_MAX_RETRY` | `10` | 最大重連次數 |
+| `WIFI_MAX_RETRY` | `5` | 重連次數，超過後進入設定網頁 |
 | `MQTT_BROKER_URI` | `mqtt://test.mosquitto.org:1883` | MQTT Broker 位址 |
 | `MQTT_TOPIC` | `home/esp32/dht11` | 發佈主題 |
 | `MQTT_USERNAME` | 空 | 選用，Broker 帳號 |
 | `MQTT_PASSWORD` | 空 | 選用，Broker 密碼 |
 | `DHT11_GPIO` | `4` | DHT11 資料腳位 |
 | `SENSOR_READ_INTERVAL_SEC` | `10` | 讀取／發佈間隔（秒） |
+| `LED_GPIO` | `8` | 狀態 LED 腳位 |
 
 > 預設 Broker 為公開的 `test.mosquitto.org`，任何人皆可訂閱，請勿用於敏感資料，並建議自訂專屬 Topic。
 
@@ -93,6 +99,16 @@ mosquitto_sub -h test.mosquitto.org -t "home/esp32/dht11"
 
 ## 運作流程
 
-1. 初始化 NVS 與 WiFi，等待取得 IP
-2. 啟動 MQTT 客戶端
-3. 每隔 `SENSOR_READ_INTERVAL_SEC` 秒讀取 DHT11，成功則發佈；讀取失敗或 MQTT 未連線時略過該次並於下個週期重試
+1. 初始化 NVS，載入設定（NVS 或 menuconfig 預設值）
+2. 連線 WiFi；失敗則進入設定網頁
+3. 連線 MQTT；失敗則進入設定網頁
+4. 每隔 `SENSOR_READ_INTERVAL_SEC` 秒讀取 DHT11，成功則發佈；讀取失敗或 MQTT 未連線時略過該次並於下個週期重試
+
+## 網頁設定入口（Config Portal）
+
+1. 連線失敗後，裝置會開啟無密碼的 AP，名稱為 `ESP32-CFG-XXYYZZ`（XXYYZZ 為 MAC 後三碼）
+2. 手機或電腦連上該 AP，瀏覽器開啟 <http://192.168.4.1>
+3. 填寫 WiFi SSID / 密碼與 MQTT Broker URI / Topic / 帳號 / 密碼，送出
+4. 設定寫入 NVS，裝置約 2 秒後自動重啟並套用
+
+要清除已儲存設定，執行中長按 BOOT 鈕（GPIO9）3 秒，期間 LED 會快閃提示。
