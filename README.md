@@ -71,7 +71,7 @@ idf.py -p <PORT> flash monitor
 | --- | --- | --- |
 | `WIFI_SSID` | `myssid` | WiFi 名稱 |
 | `WIFI_PASSWORD` | `mypassword` | WiFi 密碼 |
-| `WIFI_MAX_RETRY` | `10` | 最大重連次數 |
+| `WIFI_MAX_RETRY` | `10` | 單次喚醒內最大重連次數，超過即放棄並進入睡眠 |
 | `MQTT_BROKER_URI` | `mqtt://test.mosquitto.org:1883` | MQTT Broker 位址 |
 | `MQTT_TOPIC` | `home/esp32/dht11` | 發佈主題 |
 | `MQTT_USERNAME` | 空 | 選用，Broker 帳號 |
