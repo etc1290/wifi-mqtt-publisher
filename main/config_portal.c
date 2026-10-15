@@ -2,9 +2,8 @@
  * @file config_portal.c
  * @brief WiFi AP mode + HTTP web server for device configuration
  *
- * Starts an open AP ("ESP32-Config") at 192.168.4.1 and serves a
- * mobile-friendly HTML form for WiFi & MQTT settings. On submit,
- * saves to NVS and restarts the device.
+ * Starts a configurable AP at 192.168.4.1 and serves a mobile-friendly
+ * HTML form for WiFi & MQTT settings. On submit, saves to NVS and restarts.
  */
 
 #include "config_portal.h"
@@ -17,8 +16,8 @@
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "esp_http_server.h"
+#include "esp_random.h"
 #include "esp_system.h"
-#include "esp_mac.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -264,6 +263,17 @@ static esp_err_t handle_post_save(httpd_req_t *req)
 
 static void wifi_start_ap(void)
 {
+    size_t ssid_len = strlen(CONFIG_AP_WIFI_SSID);
+    size_t password_len = strlen(CONFIG_AP_WIFI_PASSWORD);
+    if (ssid_len > 32) {
+        ESP_LOGE(TAG, "AP SSID must be 32 bytes or fewer");
+        ESP_ERROR_CHECK(ESP_ERR_INVALID_ARG);
+    }
+    if (password_len > 0 && (password_len < 8 || password_len > 63)) {
+        ESP_LOGE(TAG, "AP password must be empty or 8 to 63 characters");
+        ESP_ERROR_CHECK(ESP_ERR_INVALID_ARG);
+    }
+
     /* If WiFi was previously initialized (STA mode), stop and deinit first */
     esp_wifi_stop();
     esp_wifi_deinit();
@@ -274,22 +284,28 @@ static void wifi_start_ap(void)
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
-    /* Generate unique AP name from MAC address: ESP32-CFG-XXYYZZ */
-    uint8_t mac[6];
-    esp_read_mac(mac, ESP_MAC_WIFI_STA);
-    char ap_ssid[32];
-    snprintf(ap_ssid, sizeof(ap_ssid), "ESP32-CFG-%02X%02X%02X",
-             mac[3], mac[4], mac[5]);
+    char generated_ssid[33];
+    const char *ap_ssid = CONFIG_AP_WIFI_SSID;
+    if (ssid_len == 0) {
+        snprintf(generated_ssid, sizeof(generated_ssid), "ESP32-CFG-%06lX",
+                 (unsigned long)(esp_random() & 0xFFFFFF));
+        ap_ssid = generated_ssid;
+        ssid_len = strlen(ap_ssid);
+    }
 
     wifi_config_t ap_config = {
         .ap = {
             .channel        = 1,
             .max_connection = 4,
-            .authmode       = WIFI_AUTH_OPEN,
+            .authmode       = password_len > 0 ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN,
         },
     };
-    strlcpy((char *)ap_config.ap.ssid, ap_ssid, sizeof(ap_config.ap.ssid));
-    ap_config.ap.ssid_len = strlen(ap_ssid);
+    memcpy(ap_config.ap.ssid, ap_ssid, ssid_len);
+    ap_config.ap.ssid_len = (uint8_t)ssid_len;
+    if (password_len > 0) {
+        strlcpy((char *)ap_config.ap.password, CONFIG_AP_WIFI_PASSWORD,
+                sizeof(ap_config.ap.password));
+    }
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));

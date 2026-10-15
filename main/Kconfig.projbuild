@@ -20,6 +20,22 @@ menu "WiFi-MQTT Publisher Configuration"
                 Number of retries before falling back to config portal.
     endmenu
 
+    menu "Configuration Portal AP"
+        config AP_WIFI_SSID
+            string "AP WiFi SSID"
+            default ""
+            help
+                SSID for the configuration portal access point. Leave empty
+                to generate a random SSID each time the portal starts.
+
+        config AP_WIFI_PASSWORD
+            string "AP WiFi Password"
+            default ""
+            help
+                Password for the configuration portal access point. Leave
+                empty for an open AP; otherwise use 8 to 63 characters.
+    endmenu
+
     menu "MQTT Settings"
         config MQTT_BROKER_URI
             string "MQTT Broker URI"

@@ -75,6 +75,8 @@ idf.py -p <PORT> flash monitor
 | `WIFI_SSID` | `myssid` | WiFi 名稱 |
 | `WIFI_PASSWORD` | `mypassword` | WiFi 密碼 |
 | `WIFI_MAX_RETRY` | `5` | 重連次數，超過後進入設定網頁 |
+| `AP_WIFI_SSID` | 空（隨機） | 設定入口 AP 名稱；留空時每次進入設定入口都隨機產生 |
+| `AP_WIFI_PASSWORD` | 空（開放 AP） | 設定入口 AP 密碼；留空表示不加密，設定時須為 8–63 個字元 |
 | `MQTT_BROKER_URI` | `mqtt://test.mosquitto.org:1883` | MQTT Broker 位址 |
 | `MQTT_TOPIC` | `home/esp32/dht11` | 發佈主題 |
 | `MQTT_USERNAME` | 空 | 選用，Broker 帳號 |
@@ -106,7 +108,7 @@ mosquitto_sub -h test.mosquitto.org -t "home/esp32/dht11"
 
 ## 網頁設定入口（Config Portal）
 
-1. 連線失敗後，裝置會開啟無密碼的 AP，名稱為 `ESP32-CFG-XXYYZZ`（XXYYZZ 為 MAC 後三碼）
+1. 連線失敗後，裝置會開啟設定入口 AP。預設 SSID 為每次隨機產生的 `ESP32-CFG-XXXXXX`；可在 menuconfig 設定固定 SSID。預設不設密碼；設定密碼後會使用 WPA2。
 2. 手機或電腦連上該 AP，瀏覽器開啟 <http://192.168.4.1>
 3. 填寫 WiFi SSID / 密碼與 MQTT Broker URI / Topic / 帳號 / 密碼，送出
 4. 設定寫入 NVS，裝置約 2 秒後自動重啟並套用

@@ -33,5 +33,6 @@
     "--query-driver=**",
     "--compile-commands-dir=/Users/sean/Desktop/上富/2026工作坊/Code/wifi-mqtt-publisher/build"
   ],
-  "idf.flashType": "UART"
+  "idf.flashType": "UART",
+  "python-envs.defaultEnvManager": "ms-python.python:system"
 }

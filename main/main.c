@@ -8,7 +8,7 @@
  *   3. Try MQTT connection → if fail → config portal (AP mode)
  *   4. Every N seconds: read DHT11 → publish JSON to MQTT topic
  *
- * Config portal: AP "ESP32-Config" → http://192.168.4.1
+ * Config portal: configurable AP (random SSID by default) → http://192.168.4.1
  */
 
 #include <stdio.h>
